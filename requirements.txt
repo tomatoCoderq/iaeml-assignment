@@ -1,0 +1,8 @@
+jax
+chex
+optax
+equinox
+flax        # use flax or equinox
+
+numpy
+pygame
