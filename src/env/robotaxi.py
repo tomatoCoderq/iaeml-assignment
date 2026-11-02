@@ -18,6 +18,53 @@ FOV = jnp.pi  # used to get 360 degree vision
 OBSTACLE_COST = 1000  # we are using int16, so choose this carefully
 FPS = 60
 
+# Reward v3. Rates are per simulated second; distances use world units.
+# Keep progress symmetric: paying more for approach than retreat would reward loops.
+REWARD_VERSION = "v3"
+PROGRESS_REWARD_WEIGHT = 0.2        # was 2.0: 10x weaker distance shaping
+TIME_PENALTY_PER_SECOND = 0.01     # was 0.1: 10x smaller movement/time cost
+IDLE_SPEED_THRESHOLD = 0.05        # forward speed below this counts as standing
+IDLE_PENALTY_PER_SECOND = 3.0      # extra idle cost; at 60 FPS this is 0.05/step
+GOAL_REWARD = 100.0
+COLLISION_REWARD = -100.0
+TARGET_CRUISE_SPEED = 1.0
+TARGET_TURN_SPEED = 0.3
+SPEED_TRACKING_WEIGHT = 0.2        # penalty = 0.2 * (v - target_speed)^2 * dt
+TURN_SLOW_ANGLE_DEG = 30.0
+TURN_SHARP_ANGLE_DEG = 60.0
+FRONT_CONE_HALF_ANGLE_DEG = 30.0
+OBSTACLE_STOP_DISTANCE = 0.25      # ray clearance to obstacle boundary
+OBSTACLE_SLOW_DISTANCE = 1.5
+GOAL_STOP_DISTANCE = 0.5           # inside the existing goal radius (1.0)
+GOAL_SLOW_DISTANCE = 3.0
+
+
+def get_reward_config():
+    """Serializable description of the exact reward used in this code version."""
+    return {
+        "version": REWARD_VERSION,
+        "progress_reward_weight": PROGRESS_REWARD_WEIGHT,
+        "time_penalty_per_second": TIME_PENALTY_PER_SECOND,
+        "idle_speed_threshold": IDLE_SPEED_THRESHOLD,
+        "idle_penalty_per_second": IDLE_PENALTY_PER_SECOND,
+        "goal_reward": GOAL_REWARD,
+        "collision_reward": COLLISION_REWARD,
+        "target_cruise_speed": TARGET_CRUISE_SPEED,
+        "target_turn_speed": TARGET_TURN_SPEED,
+        "speed_tracking_weight": SPEED_TRACKING_WEIGHT,
+        "turn_slow_angle_deg": TURN_SLOW_ANGLE_DEG,
+        "turn_sharp_angle_deg": TURN_SHARP_ANGLE_DEG,
+        "front_cone_half_angle_deg": FRONT_CONE_HALF_ANGLE_DEG,
+        "obstacle_stop_distance": OBSTACLE_STOP_DISTANCE,
+        "obstacle_slow_distance": OBSTACLE_SLOW_DISTANCE,
+        "goal_stop_distance": GOAL_STOP_DISTANCE,
+        "goal_slow_distance": GOAL_SLOW_DISTANCE,
+        "idle_penalty_only_when_target_exceeds_idle_threshold": True,
+        "terminal_rewards_override_dense_reward": True,
+        "collision_has_priority_over_goal": True,
+    }
+
+
 PATHFINDING_MOVES = jnp.array([[0, 1], [0, -1], [-1, 0], [1, 0]], dtype=jnp.float32)
 PATHFINDING_MOVES_DIAG = jnp.array(
     [[1, 1], [-1, -1], [-1, 1], [1, -1]], dtype=jnp.float32
@@ -41,6 +88,7 @@ class RoboTaxiState(BaseEnvState):
 class RoboTaxiObservation(BaseEnvObservation):
     # сверху храним наблюдение такси, те его данные о мире вокруг и себе
     velocity: chex.Array  # TODO: здесь одно число или массив?
+    target_speed: chex.Array
 
     def as_vector(self) -> chex.Array:
         return jnp.concatenate([
@@ -48,6 +96,7 @@ class RoboTaxiObservation(BaseEnvObservation):
             jnp.ravel(self.direction_of_path),
             jnp.ravel(self.collision_rays),
             jnp.ravel(self.velocity),
+            jnp.ravel(self.target_speed),
         ])
 
 
@@ -185,17 +234,6 @@ class RoboTaxi(BaseEnv):
         time_done = new_time >= env_params.max_steps_in_episode
         done = goal_done | collision_done | time_done
 
-        old_distance = jnp.linalg.norm(env_state.agent_pos - env_state.goal_pos)
-        new_distance = jnp.linalg.norm(new_state.agent_pos - new_state.goal_pos)
-        progress = old_distance - new_distance
-        reward = 2.0 * progress - 0.1 * env_params.step_size
-        # Collision takes priority if collision and goal occur together.
-        reward = jnp.where(
-            collision_done,
-            -100.0,
-            jnp.where(goal_done, 100.0, reward),
-        )
-
         # Replan once per simulated second, while the episode is active.
         should_replan = (jnp.mod(new_time, env_params.fps) == 0) & ~done
         path_array = jax.lax.cond(
@@ -211,12 +249,37 @@ class RoboTaxi(BaseEnv):
         )
 
         obs = RoboTaxi.get_observation(new_state, env_params)
+        old_distance = jnp.linalg.norm(env_state.agent_pos - env_state.goal_pos)
+        new_distance = jnp.linalg.norm(new_state.agent_pos - new_state.goal_pos)
+        progress = old_distance - new_distance
+        progress_reward = PROGRESS_REWARD_WEIGHT * progress
+        time_penalty = TIME_PENALTY_PER_SECOND * env_params.step_size
+        is_idle = new_state.velocity < IDLE_SPEED_THRESHOLD
+        idle_penalty_applied = is_idle & (obs.target_speed > IDLE_SPEED_THRESHOLD)
+        idle_penalty = jnp.where(
+            idle_penalty_applied, IDLE_PENALTY_PER_SECOND * env_params.step_size, 0.0
+        )
+        speed_error = new_state.velocity - obs.target_speed
+        speed_penalty = SPEED_TRACKING_WEIGHT * jnp.square(speed_error) * env_params.step_size
+        reward = progress_reward - time_penalty - idle_penalty - speed_penalty
+        # Fixed terminal rewards override all dense terms; collision has priority.
+        reward = jnp.where(
+            collision_done, COLLISION_REWARD, jnp.where(goal_done, GOAL_REWARD, reward)
+        )
         info = {
             "time": new_time,
             "distance_to_path": obs.distance_to_path,
             "direction_of_path": obs.direction_of_path,
             "velocity": new_state.velocity,
             "progress": progress,
+            "progress_reward": progress_reward,
+            "time_penalty": time_penalty,
+            "idle_penalty": idle_penalty,
+            "is_idle": is_idle,
+            "target_speed": obs.target_speed,
+            "speed_error": speed_error,
+            "speed_penalty": speed_penalty,
+            "idle_penalty_applied": idle_penalty_applied,
             "goal_done": goal_done,
             "collision_done": collision_done,
             "time_done": time_done,
@@ -243,12 +306,63 @@ class RoboTaxi(BaseEnv):
         rays, ray_perceptions = BaseEnv._collision_ray_intersections(
             env_state.agent_pos, env_state.agent_forward_dir, obstacles, env_params
         )
+        collision_rays = rays * ray_perceptions[:, None]
+        target_speed = RoboTaxi._get_target_speed(env_state, env_params, collision_rays)
         return RoboTaxiObservation(
             distance_to_path=distance_to_path,
             direction_of_path=path_dir,
-            collision_rays=rays * ray_perceptions[:, None],
+            collision_rays=collision_rays,
             velocity=env_state.velocity,
+            target_speed=target_speed,
         )
+
+    def _get_target_speed(env_state, env_params, collision_rays):
+        """A reward/reference speed, not an override of the actor's action.
+
+        Side/rear obstacles do not force a stop. Slow down for the direction
+        toward a waypoint two entries ahead, obstacles within a forward cone,
+        and the goal. The goal's zero-speed point lies inside its success radius.
+        """
+        closest = jnp.argmin(jnp.linalg.norm(
+            env_state.path_array - env_state.agent_pos, axis=-1
+        ))
+        lookahead = jnp.minimum(closest + 2, env_state.path_array.shape[0] - 1)
+        desired = env_state.path_array[lookahead] - env_state.agent_pos
+        desired = jnp.where(
+            jnp.linalg.norm(desired) > 1e-6, desired,
+            env_state.goal_pos - env_state.agent_pos,
+        )
+        desired = desired / (jnp.linalg.norm(desired) + 1e-8)
+        forward = env_state.agent_forward_dir
+        forward = forward / (jnp.linalg.norm(forward) + 1e-8)
+        angle = jnp.arccos(jnp.clip(jnp.dot(desired, forward), -1.0, 1.0))
+        turn_fraction = jnp.clip(
+            (angle - jnp.deg2rad(TURN_SLOW_ANGLE_DEG))
+            / jnp.deg2rad(TURN_SHARP_ANGLE_DEG - TURN_SLOW_ANGLE_DEG), 0.0, 1.0
+        )
+        turn_limit = TARGET_CRUISE_SPEED - (
+            TARGET_CRUISE_SPEED - TARGET_TURN_SPEED
+        ) * turn_fraction
+
+        angles = jnp.linspace(
+            -env_params.agent_FOV, env_params.agent_FOV,
+            env_params.num_ray_sensors, endpoint=False,
+        )
+        forward_rays = jnp.abs(angles) <= jnp.deg2rad(FRONT_CONE_HALF_ANGLE_DEG)
+        distances = jnp.linalg.norm(collision_rays, axis=-1)
+        front_clearance = jnp.min(jnp.where(
+            forward_rays, distances, env_params.perception_radius
+        ))
+        obstacle_limit = TARGET_CRUISE_SPEED * jnp.clip(
+            (front_clearance - OBSTACLE_STOP_DISTANCE)
+            / (OBSTACLE_SLOW_DISTANCE - OBSTACLE_STOP_DISTANCE), 0.0, 1.0
+        )
+        goal_distance = jnp.linalg.norm(env_state.goal_pos - env_state.agent_pos)
+        goal_limit = TARGET_CRUISE_SPEED * jnp.clip(
+            (goal_distance - GOAL_STOP_DISTANCE)
+            / (GOAL_SLOW_DISTANCE - GOAL_STOP_DISTANCE), 0.0, 1.0
+        )
+        return jnp.minimum(turn_limit, jnp.minimum(obstacle_limit, goal_limit))
 
     def _simulate_dynamics(
         env_state: RoboTaxiState,
