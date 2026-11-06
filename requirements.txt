@@ -6,3 +6,5 @@ flax        # use flax or equinox
 
 numpy
 pygame
+distrax
+tqdm
