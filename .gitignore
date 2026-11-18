@@ -5,3 +5,6 @@ docs/
 checkpoints/
 runs/
 tests/
+
+.ruff_cache
+.venv

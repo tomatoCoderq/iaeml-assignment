@@ -1,9 +1,10 @@
-from functools import partial
-import jax
-import pygame
-import jax.numpy as jnp
-from jax import random
 import math
+from functools import partial
+
+import jax
+import jax.numpy as jnp
+import pygame
+from jax import random
 
 from utils import utils
 
@@ -20,9 +21,15 @@ YELLOW = (200, 200, 50)
 
 # TODO: draw time
 
+
 class PygameFrontend:
     def __init__(
-        self, env, env_params, init_state, eval_mode=False, agent_fn=None,
+        self,
+        env,
+        env_params,
+        init_state,
+        eval_mode=False,
+        agent_fn=None,
         control_mode="cartesian",
     ):
         if control_mode not in ("cartesian", "vehicle"):
@@ -53,9 +60,7 @@ class PygameFrontend:
         self.key = random.PRNGKey(0)
         self.obs, self.state = self.env.reset(self.key, env_params, init_state)
         self.running = True
-        rotate_to_map_f = partial(
-            utils.convert_to_map_view, map_shape=env_params.map_height_width
-        )
+        rotate_to_map_f = partial(utils.convert_to_map_view, map_shape=env_params.map_height_width)
         self.rotate_to_map_vmap = jax.vmap(rotate_to_map_f, in_axes=(0))
 
     def draw_square_with_striped_circle(
@@ -98,9 +103,9 @@ class PygameFrontend:
         ]
 
         # Draw lines connecting waypoints
-        for start, end in zip(pixels[:-1], pixels[1:]):
+        for start, end in zip(pixels[:-1], pixels[1:], strict=True):
             pygame.draw.line(self.screen, BLUE, start, end, 3)
-            
+
     def draw_rays_transparent(self, screen: pygame.Surface, agent_pos, rays, cell_size, alpha=80):
         """
         Draw transparent red rays from the agent's position.
@@ -116,17 +121,23 @@ class PygameFrontend:
         screen_width, screen_height = screen.get_size()
         ray_surf = pygame.Surface((screen_width, screen_height), pygame.SRCALPHA)
 
-        agent_px = (int((agent_pos[1] + 0.5) * cell_size),
-                    int((agent_pos[0] + 0.5) * cell_size))
+        agent_px = (int((agent_pos[1] + 0.5) * cell_size), int((agent_pos[0] + 0.5) * cell_size))
 
         for vec in rays:
-            end_px = (int(agent_px[0] + vec[1] * cell_size),
-                    int(agent_px[1] + vec[0] * cell_size))
+            end_px = (int(agent_px[0] + vec[1] * cell_size), int(agent_px[1] + vec[0] * cell_size))
             pygame.draw.line(ray_surf, (255, 0, 0, alpha), agent_px, end_px, 2)
 
         screen.blit(ray_surf, (0, 0))
 
-    def draw_info(self, screen: pygame.Surface, info: dict, position=(10, 10), font_size=15, line_height=25, color=RED):
+    def draw_info(
+        self,
+        screen: pygame.Surface,
+        info: dict,
+        position=(10, 10),
+        font_size=15,
+        line_height=25,
+        color=RED,
+    ):
         """
         Draws a dictionary of info on the screen.
 
@@ -154,7 +165,9 @@ class PygameFrontend:
         self.screen.fill(WHITE)
 
         # To map coordinates
-        path_array = self.rotate_to_map_vmap(self.state.path_array)
+        reference = getattr(self.params, "reference_points", None)
+        route = self.state.path_array if reference is None else jnp.asarray(reference)
+        path_array = self.rotate_to_map_vmap(route)
         static_obst_map = self.rotate_to_map_vmap(self.state.static_obstacles)
         kin_obst_map = self.rotate_to_map_vmap(self.state.kinematic_obstacles)
 
@@ -194,15 +207,28 @@ class PygameFrontend:
         center_px = (int((x + 0.5) * self.CELL_SIZE), int((y + 0.5) * self.CELL_SIZE))
         pygame.draw.circle(self.screen, GREEN, center_px, self.GOAL_RADIUS_PX)
 
+        subgoals = getattr(self.params, "subgoal_positions", ())
+        active = int(getattr(self.state, "subgoal_index", 0))
+        for index, position in enumerate(subgoals):
+            if index < active:
+                continue
+            map_position = utils.convert_to_map_view(
+                jnp.asarray(position), self.params.map_height_width
+            )
+            center = tuple(int((value + 0.5) * self.CELL_SIZE) for value in map_position[::-1])
+            radius = int(self.params.subgoal_radius * self.CELL_SIZE)
+            pygame.draw.circle(self.screen, YELLOW, center, radius, 2)
+            label = pygame.font.SysFont("Arial", 18).render(str(index + 1), True, BLACK)
+            self.screen.blit(label, label.get_rect(center=center))
+
         # draw rays after obstacles
         self.draw_rays_transparent(self.screen, agent_pos, rays, self.CELL_SIZE)
-        
+
         # Draw agent
         y, x = agent_pos
         center_px = (int((x + 0.5) * self.CELL_SIZE), int((y + 0.5) * self.CELL_SIZE))
         pygame.draw.circle(self.screen, BLUE, center_px, self.AGENT_RADIUS_PX)
 
-        
         # Draw agent facing direction
         dir_vec = agent_forward_dir
         norm = math.sqrt(dir_vec[0] ** 2 + dir_vec[1] ** 2) + 1e-6
@@ -212,9 +238,9 @@ class PygameFrontend:
         )
         end_pos = (center_px[0] + dir_vec_px[0], center_px[1] + dir_vec_px[1])
         pygame.draw.line(self.screen, YELLOW, center_px, end_pos, 3)
-        
+
         # Draw info
-        self.draw_info(self.screen, self.info) 
+        self.draw_info(self.screen, self.info)
 
         pygame.display.flip()
 
@@ -225,10 +251,13 @@ class PygameFrontend:
             brake = int(keys[pygame.K_DOWN] or keys[pygame.K_s])
             left = int(keys[pygame.K_LEFT] or keys[pygame.K_a])
             right = int(keys[pygame.K_RIGHT] or keys[pygame.K_d])
-            return jnp.array([
-                (throttle - brake) * self.params.max_acceleration,
-                (left - right) * jnp.deg2rad(self.params.max_steering_angle),
-            ], dtype=jnp.float32)
+            return jnp.array(
+                [
+                    (throttle - brake) * self.params.max_acceleration,
+                    (left - right) * jnp.deg2rad(self.params.max_steering_angle),
+                ],
+                dtype=jnp.float32,
+            )
 
         action = jnp.array([0.0, 0.0], dtype=jnp.float32)
         if keys[pygame.K_UP] or keys[pygame.K_w]:
@@ -240,9 +269,7 @@ class PygameFrontend:
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
             action += jnp.array([1, 0])
 
-        action = (
-            action / jnp.linalg.norm(action) if jnp.any(jnp.abs(action) > 0) else action
-        )
+        action = action / jnp.linalg.norm(action) if jnp.any(jnp.abs(action) > 0) else action
         return action
 
     def run(self):

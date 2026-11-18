@@ -1,12 +1,11 @@
-import jax
-from jax import numpy as jnp
-import equinox
-import chex
-
 from functools import partial
-from typing import Tuple, Dict, Any
+from typing import Any
 
+import chex
+import equinox
+import jax
 import numpy as np
+from jax import numpy as jnp
 
 from env.tasks import BaseTaskSampler
 from utils import utils
@@ -23,9 +22,7 @@ OBSTACLE_COST = 1000  # we are using int16, so choose this carefully
 FPS = 60
 
 PATHFINDING_MOVES = jnp.array([[0, 1], [0, -1], [-1, 0], [1, 0]], dtype=jnp.float32)
-PATHFINDING_MOVES_DIAG = jnp.array(
-    [[1, 1], [-1, -1], [-1, 1], [1, -1]], dtype=jnp.float32
-)
+PATHFINDING_MOVES_DIAG = jnp.array([[1, 1], [-1, -1], [-1, 1], [1, -1]], dtype=jnp.float32)
 
 # TODO: collision
 # TODO: observation. why ray is flat
@@ -38,10 +35,10 @@ class BaseEnvParams(equinox.Module):
     max_steps_in_episode: int
     fps: int
     step_size: int
-    map_height_width: Tuple[int, int]
+    map_height_width: tuple[int, int]
     # Discritized version of the map. used to find a path
-    nav_grid_shape_dtype: Tuple[chex.Shape, chex.ArrayDType]
-    path_array_shape_dtype: Tuple[chex.Shape, chex.ArrayDType]
+    nav_grid_shape_dtype: tuple[chex.Shape, chex.ArrayDType]
+    path_array_shape_dtype: tuple[chex.Shape, chex.ArrayDType]
     # Time discretization step size
     discretization_scale: int
     num_ray_sensors: float
@@ -94,7 +91,6 @@ class BaseEnvObservation(equinox.Module):
 
 
 class BaseEnv:
-
     # abstract
     def init_params(
         key: chex.PRNGKey,
@@ -106,7 +102,7 @@ class BaseEnv:
         num_ray_sensors: float = NUM_RAY_SENSORS,
         fov: float = FOV,
         fps: float = FPS,
-    ) -> Tuple[BaseEnvParams, BaseEnvState]:
+    ) -> tuple[BaseEnvParams, BaseEnvState]:
 
         if discretization_scale != 1:
             raise Exception("discretization_scale != 1 is not implemented!")
@@ -142,15 +138,9 @@ class BaseEnv:
             agent_pos=convert_to_world_f(task.agent_pos).astype(jnp.float32),
             agent_forward_dir=task.agent_forward_dir.astype(jnp.float32),
             # agent_goal_dir=task.agent_goal_dir,
-            static_obstacles=convert_to_world_vmap(task.static_obstacles).astype(
-                jnp.float32
-            ),
-            kinematic_obstacles=convert_to_world_vmap(task.kinematic_obstacles).astype(
-                jnp.float32
-            ),
-            kinematic_obst_velocities=task.kinematic_obst_velocities.astype(
-                jnp.float32
-            ),
+            static_obstacles=convert_to_world_vmap(task.static_obstacles).astype(jnp.float32),
+            kinematic_obstacles=convert_to_world_vmap(task.kinematic_obstacles).astype(jnp.float32),
+            kinematic_obst_velocities=task.kinematic_obst_velocities.astype(jnp.float32),
             path_array=jnp.zeros(shape=shape, dtype=dtype),
         )
         obstacles = jnp.concatenate(
@@ -168,7 +158,7 @@ class BaseEnv:
     @partial(jax.jit, static_argnames=("env_params",))
     def reset(
         key: chex.PRNGKey, env_params: BaseEnvParams, init_state: BaseEnvState | None
-    ) -> Tuple[chex.Array, BaseEnvState]:
+    ) -> tuple[chex.Array, BaseEnvState]:
 
         if init_state is not None:
             state = init_state
@@ -184,9 +174,7 @@ class BaseEnv:
         env_state: BaseEnvState,
         action: chex.Scalar | chex.Array,
         env_params: BaseEnvParams,
-    ) -> Tuple[
-        chex.Array, BaseEnvState, chex.Scalar | chex.Array, chex.Array, Dict[Any, Any]
-    ]:
+    ) -> tuple[chex.Array, BaseEnvState, chex.Scalar | chex.Array, chex.Array, dict[Any, Any]]:
         # concatenate static and dynamic obstacles
         obstacles = jnp.concatenate(
             [env_state.static_obstacles, env_state.kinematic_obstacles], axis=0
@@ -200,8 +188,12 @@ class BaseEnv:
         done = jnp.logical_or(goal_done, jnp.logical_or(collision_done, time_done))
 
         # Calculate reward
-        true_reward_f = lambda _: 1.0  # Define your own
-        false_reward_f = lambda _: 0.0  # Define your own
+        def true_reward_f(_):
+            return 1.0
+
+        def false_reward_f(_):
+            return 0.0
+
         reward = jax.lax.cond(goal_done, true_reward_f, false_reward_f, None)
         # NOTE: what I have define above is called sparse reward. You dont have to use a sparse reward
 
@@ -216,9 +208,7 @@ class BaseEnv:
         pred = jnp.mod(new_time, env_params.fps)
         path_array = jax.lax.cond(
             pred,
-            lambda _: BaseEnv._find_path(
-                new_agent_pos, env_state.goal_pos, obstacles, env_params
-            ),
+            lambda _: BaseEnv._find_path(new_agent_pos, env_state.goal_pos, obstacles, env_params),
             lambda _: env_state.path_array,
             None,
         )
@@ -245,14 +235,16 @@ class BaseEnv:
             path_array=path_array,
         )
         obs = BaseEnv.get_observation(new_state, env_params)
-        info = {"time": new_time, "distance_to_path": obs.distance_to_path, "direction_of_path": obs.direction_of_path}
+        info = {
+            "time": new_time,
+            "distance_to_path": obs.distance_to_path,
+            "direction_of_path": obs.direction_of_path,
+        }
         # NOTE: info is used for evaluation
 
         return obs, new_state, reward, done, info
 
-    def get_observation(
-        env_state: BaseEnvState, env_params: BaseEnvParams
-    ) -> BaseEnvObservation:
+    def get_observation(env_state: BaseEnvState, env_params: BaseEnvParams) -> BaseEnvObservation:
         # find the closest waypoints
         dists = jnp.linalg.norm(env_state.path_array - env_state.agent_pos, axis=1)
         closest_idx = jnp.argmin(dists)
@@ -294,8 +286,8 @@ class BaseEnv:
 
     def _check_collisions(agent_pos, obstacles, circle_radius=RADIUS) -> chex.Array:
         distances = jnp.linalg.norm(agent_pos - obstacles, axis=1)
-        
-        is_colliding = distances < circle_radius - 1e-4 # give some room
+
+        is_colliding = distances < circle_radius - 1e-4  # give some room
         return jnp.any(is_colliding)
 
     def _check_goal(agent_pos, goal_pos, circle_radius=RADIUS) -> chex.Array:
@@ -332,9 +324,7 @@ class BaseEnv:
         )
 
         # predefined number of rays around the agent
-        ray_perceptions = BaseEnv._ray_circle_intersections(
-            agent_pos, rays, obstacles, RADIUS
-        )
+        ray_perceptions = BaseEnv._ray_circle_intersections(agent_pos, rays, obstacles, RADIUS)
 
         # Apply perception radius limit
         ray_perceptions = jnp.where(
@@ -422,9 +412,7 @@ class BaseEnv:
     def _construct_navigation_grid(goal_pos, obstacles, env_params: BaseEnvParams):
         """ """
 
-        obstacle_poses = BaseEnv._to_grid_pos(
-            obstacles, env_params.discretization_scale
-        )
+        obstacle_poses = BaseEnv._to_grid_pos(obstacles, env_params.discretization_scale)
         goal_pos = BaseEnv._to_grid_pos(goal_pos, env_params.discretization_scale)
         goal_pos = jnp.atleast_2d(goal_pos)
 
@@ -440,9 +428,7 @@ class BaseEnv:
         navigation_grid = jnp.zeros(shape=shape, dtype=jnp.int16)
         V = jnp.zeros_like(navigation_grid, dtype=jnp.int16)
 
-        navigation_grid = navigation_grid.at[
-            obstacle_poses[:, 0], obstacle_poses[:, 1]
-        ].set(1)
+        navigation_grid = navigation_grid.at[obstacle_poses[:, 0], obstacle_poses[:, 1]].set(1)
         V = V.at[goal_pos[:, 0], goal_pos[:, 1]].set(1)
 
         # jax.debug.print("V={V}", V=V)
@@ -490,9 +476,7 @@ class BaseEnv:
         navigation_grid = jnp.reshape(
             jnp.where(inflated_nav_grid, 1, 0).astype(dtype=jnp.bool), shape=shape
         )
-        V = jnp.reshape(
-            jnp.where(inflated_V, 0, jnp.inf).astype(dtype=dtype), shape=shape
-        )
+        V = jnp.reshape(jnp.where(inflated_V, 0, jnp.inf).astype(dtype=dtype), shape=shape)
 
         # jax.debug.print("V={V}", V=V)
         # jax.debug.print("mask={x}", x=navigation_grid)
@@ -508,9 +492,11 @@ class BaseEnv:
 
         # solve DP
         def DP(V, mask):
-            roll_f = lambda nav, dir: jnp.roll(
-                jnp.roll(nav, shift=dir[0], axis=0), shift=dir[1], axis=1
-            )
+            def roll_f(nav, direction):
+                return jnp.roll(
+                    jnp.roll(nav, shift=direction[0], axis=0), shift=direction[1], axis=1
+                )
+
             roll_vmap = jax.vmap(
                 roll_f, in_axes=(None, 0), out_axes=-1
             )  # outputs is batched along axis -1 (the last)
@@ -528,10 +514,7 @@ class BaseEnv:
                 rolled_Vs = jnp.concatenate([rolled_Vs, rolled_Vs_diag], axis=-1)
                 costs = jnp.concatenate([costs, costs_diag], axis=-1)
 
-                V = (
-                    jnp.minimum(V, jnp.min(rolled_Vs + costs, axis=-1))
-                    + mask * OBSTACLE_COST / 10
-                )
+                V = jnp.minimum(V, jnp.min(rolled_Vs + costs, axis=-1)) + mask * OBSTACLE_COST / 10
                 return V
 
             V = jax.lax.fori_loop(0, N, body_f, init_val=(V))

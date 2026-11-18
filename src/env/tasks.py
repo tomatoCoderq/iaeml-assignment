@@ -1,7 +1,7 @@
-import chex
-from jax import numpy as jnp
 from dataclasses import dataclass, field
 
+import chex
+from jax import numpy as jnp
 
 # Define any 10x20 map
 MAPS = [
@@ -99,6 +99,4 @@ class BaseTaskSampler:
         self.agent_pos = agent_pos
         self.goal_pos = goal_pos
         # normalized direction to goal
-        self.agent_goal_dir = (goal_pos - agent_pos) / jnp.linalg.norm(
-            goal_pos - agent_pos
-        )
+        self.agent_goal_dir = (goal_pos - agent_pos) / jnp.linalg.norm(goal_pos - agent_pos)

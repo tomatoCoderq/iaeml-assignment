@@ -1,5 +1,25 @@
 # PPO for RoboTaxi
 
+The default reward combines route progress (weight 0.2) with a stagnation
+cost of 0.2 per simulated second after 3 seconds without improving the best
+remaining route distance by 0.1. The fixed reference uses static obstacles.
+
+Ordered intermediate goals can be sampled by fraction of the initial static
+route length. Each pays once, with a total bonus budget of 10 per episode.
+The final destination and episode termination remain the original task.
+
+```bash
+PYTHONPATH=src python -m algorithms.ppo train --total-steps 3000000 --subgoals 0.15 0.35 --log-dir runs/subgoals --checkpoint checkpoints/subgoals.msgpack
+```
+
+Subgoal runs add three observation features (72 with 32 rays): the active
+target offset in vehicle coordinates, scaled by max(distance, perception radius),
+and the fraction of intermediate goals remaining. The active target becomes the
+final destination after the intermediate goals. Use --observe-navigation-target
+without --subgoals for a matched control. Default runs retain 69 features.
+Checkpoint settings reproduce the reward and observation configuration.
+Legacy v3 checkpoints retain their original reward on loading.
+
 Run commands from the repository root with the Python environment containing
 the dependencies in `requirements.txt` (the local environment is `jaxing`).
 
@@ -29,7 +49,7 @@ minibatch updates are compiled. Adam moments persist across updates, and gradien
 are clipped. Actor loss includes `-0.01 * H(tanh(Normal))`, with fresh
 Monte Carlo entropy samples per minibatch. Running observation statistics are omitted.
 
-Reward v3 uses `0.2 * (old_distance - new_distance) - 0.01 * dt`, minus
+Legacy reward v3 uses `0.2 * (old_distance - new_distance) - 0.01 * dt`, minus
 `0.2 * (speed - target_speed)**2 * dt`. Target speed is up to `1.0` on a clear
 straight section, reduced toward `0.3` for turns, and reduced further near forward
 obstacles and the goal. A stop is requested when a forward ray's clearance is
@@ -50,7 +70,7 @@ PYTHONPATH=src python -m algorithms.ppo evaluate --checkpoint checkpoints/ppo_v3
 Training logs include `mean_velocity` and `mean_target_speed`; renderer info
 includes `target_speed`, `speed_error`, `speed_penalty` and `idle_penalty_applied`.
 Exact coefficients, the baseline experiment, and its observed failure are recorded
-in [the reward history](../../docs/reward_history.md). New config log records and
+in [the second assignment report](../../report_assignment_2.md). New config log records and
 checkpoints also store the reward version and entropy coefficient.
 
 Metrics are appended to `runs/ppo/train.jsonl`. The final weights and environment
@@ -65,8 +85,47 @@ evaluation on one map does not test generalization. Use `--map-id 1` or `2` to
 evaluate other provided maps. A working training loop is not evidence that the
 policy has learned to reach the goal; assess that through evaluation/video.
 
-Tests (including rendering into SDL's in-memory display):
+## Demonstrations and DAgger
+
+Train the Pure Pursuit teacher, behavioral cloning, three DAgger rounds and
+PPO with a teacher-action regularizer.
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests -v
+JAX_PLATFORM_NAME=cpu PYTHONPATH=src .venv/bin/python -m algorithms.imitation --output runs/imitation_new
+JAX_PLATFORM_NAME=cpu PYTHONPATH=src .venv/bin/python -m algorithms.ppo evaluate --checkpoint report_assets/best_policy.msgpack --episodes 20 --render
 ```
+
+Tracking checkpoints automatically select TrackingEnv on loading. Its 72 inputs
+include the original ray/path features, speed, a predictive speed reference,
+a lookahead offset in vehicle coordinates, and progress along the reference.
+The static reference has obstacle clearance 1.25. Moving-obstacle prediction
+uses their simulated positions and velocities over two seconds. The neural
+network supplies acceleration and steering during evaluation.
+
+Teacher data use successful demonstrations. DAgger collects labels at states
+visited by action mixtures with teacher fractions 0.5, 0.2 and 0.0.
+The actor receives 5000 initial supervised updates and 2500 per DAgger round.
+PPO uses 200000 environment steps, actor LR 3e-5, two epochs and imitation
+weight 0.5. Environment dynamics and terminal goal/collision checks are shared
+with RoboTaxi. Dense speed/idle rewards track the new speed reference.
+
+PPO optimizer/RNG sidecars use the .training.msgpack suffix. The
+restore_training_state helper in algorithms.imitation restores them and
+checks the associated weight hash. Live rollout states restart.
+Success-rate comparison is followed by collision rate, episode duration and
+return when choosing best_policy.msgpack.
+
+## Code checks
+
+Ruff is pinned in the `dev` dependency group. Run the linter and formatter from
+an environment containing Ruff, or use the standalone tool command below without
+changing the simulator's Python environment:
+
+```bash
+uv tool run --from ruff==0.17.5 ruff check src
+uv tool run --from ruff==0.17.5 ruff format --check src
+```
+
+The submitted inference checkpoint is `report_assets/best_policy.msgpack`.
+It includes the actor, critic and environment settings; it does not include Adam
+states. See `report_assets/readme.md` for its hash and playback commands.

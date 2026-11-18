@@ -1,10 +1,8 @@
-import jax
 import chex
 import equinox
+import jax
 
-from typing import Tuple
-
-from env.base import BaseEnvParams, BaseEnvState, BaseEnv
+from env.base import BaseEnv, BaseEnvParams, BaseEnvState
 
 
 class AutoResetWrapper(equinox.Module):
@@ -16,10 +14,8 @@ class AutoResetWrapper(equinox.Module):
     def reset(
         self,
         key: chex.PRNGKey,
-        *args
-        # env_params: BaseEnvParams,
-        # init_state: BaseEnvState | None,
-    ) -> Tuple[chex.Array, BaseEnvState]:
+        *args,
+    ) -> tuple[chex.Array, BaseEnvState]:
         # Initial state arrays remain dynamic PyTree leaves for JAX.
         obs, state = self.env.reset(key, self.env_params, self.init_state)
         return obs, state
@@ -30,16 +26,13 @@ class AutoResetWrapper(equinox.Module):
         key: chex.PRNGKey,
         state: BaseEnvState,
         action: chex.Array,
-        *args
-        # env_params: BaseEnvParams,
-    ) -> Tuple[chex.Array, BaseEnvState, chex.Scalar, BaseEnvState, dict]:
+        *args,
+    ) -> tuple[chex.Array, BaseEnvState, chex.Scalar, chex.Array, dict]:
         """
         Returns: obs, state, reward, done, info
         But auto-resets if done=True
         """
-        obs, new_state, reward, done, info = self.env.step(
-            key, state, action, self.env_params
-        )
+        obs, new_state, reward, done, info = self.env.step(key, state, action, self.env_params)
 
         def reset_state(_):
             if "goal_done" in info:
@@ -59,8 +52,7 @@ class AutoResetWrapper(equinox.Module):
                     reward=reward,
                 )
             new_obs, new_st = self.reset(key, self.env_params, self.init_state)
-            # new_info = {"time": 0, "distance_to_path": new_obs.distance_to_path}
-            # NOTE: we pass the reward from outside this context
+            # Preserve the terminal reward/info while returning the reset observation.
             return new_obs, new_st, reward, info
 
         # If done, reset

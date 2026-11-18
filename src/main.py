@@ -1,41 +1,27 @@
 import jax
 
-from env.base import BaseEnv
-from env.robotaxi import RoboTaxi
-from utils.renderer import PygameFrontend
+from env.route_rewards import RouteRewardEnv as RoboTaxi
 from utils.autoreset import AutoResetWrapper
+from utils.renderer import PygameFrontend
 
 
-key = jax.random.PRNGKey(0)
-# env_params, init_state = BaseEnv.init_params(
-#     key=key,
-#     map_id=0,
-#     max_steps=1000,
-#     discretization_scale=1,
-#     path_length=100,
-#     fps=60,
-#     perception_radius=5.0,
-#     num_ray_sensors=32,
-# )
+def main():
+    """Open the simulator for manual acceleration and steering control."""
+    key = jax.random.PRNGKey(0)
+    env_params, init_state = RoboTaxi.init_params(
+        key=key,
+        map_id=0,
+        max_steps=1000,
+        discretization_scale=1,
+        path_length=100,
+        fps=60,
+        perception_radius=5.0,
+        num_ray_sensors=32,
+    )
+    env = AutoResetWrapper(RoboTaxi, env_params, init_state)
+    frontend = PygameFrontend(env, env_params, init_state, control_mode="vehicle")
+    frontend.run()
 
-env_params, init_state = RoboTaxi.init_params(
-    key=key,
-    map_id=0,
-    max_steps=1000,
-    discretization_scale=1,
-    path_length=100,
-    fps=60,
-    perception_radius=5.0,
-    num_ray_sensors=32,
-)
 
-env = AutoResetWrapper(RoboTaxi, env_params, init_state)
-
-# test parallel envs
-# TBD
-
-# test renderer
-frontend = PygameFrontend(
-    env, env_params, init_state, eval_mode=False, control_mode="vehicle"
-)
-frontend.run()
+if __name__ == "__main__":
+    main()
